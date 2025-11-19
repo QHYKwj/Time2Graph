@@ -185,13 +185,27 @@ def load_full_dataset(base_dir, farm, turbine_id, train_end_date):
 
     # 5) 生成回归目标：用 np.roll 取未来 20 步（10 分钟）的机舱 4 维
     # 注意：最后 20 个样本的标签会“循环”到前面，如果要严格避免泄露，可以后续再裁剪。
-    horizon = 20
+    horizon = 1
     y_train = np.roll(turbine_train, -horizon, axis=0)  # (T_train, 4)
     y_test  = np.roll(turbine_test, -horizon, axis=0)   # (T_test, 4)
 
     print(f"{farm}/{turbine_id} -> x_train: {x_train.shape}, y_train: {y_train.shape}, "
           f"x_test: {x_test.shape}, y_test: {y_test.shape}")
-
+    
+    # === debug 1: 检查 np.roll 的效果是不是 +1 步 ===
+    print("=== debug roll in load_full_dataset ===")
+    T_train = turbine_train.shape[0]
+    check_idx = [100, 500, 1000]  # 可以随便挑几个，不越界就行
+    for t in check_idx:
+        if t + 1 >= T_train:
+            continue
+        cur_speed = turbine_train[t, 2]
+        next_speed = turbine_train[t + 1, 2]
+        rolled_speed = y_train[t, 2]
+        print(f"t={t}: cur_speed={cur_speed:.4f}, "
+              f"next_speed={next_speed:.4f}, "
+              f"rolled_label_speed={rolled_speed:.4f}")
+    
     return x_train, y_train, x_test, y_test
 
 def build_t2g_dataset(x_seq, y_seq, seg_length, num_segment):
@@ -230,6 +244,20 @@ def build_t2g_dataset(x_seq, y_seq, seg_length, num_segment):
     wind_direction = y_block[:, -1, 3] # (N,)
     
     Y = np.column_stack([wind_speed, wind_direction])  # (N, 2)
+
+    # === debug 2: 检查窗口最后一个输入点 & 标签的关系 ===
+    print("=== debug window-level label in build_t2g_dataset ===")
+    print("X shape:", X.shape, "Y shape:", Y.shape)  # 期望: (N, L, 7), (N, 2)
+    for i in range(min(5, N)):
+        last_speed_in_X = X[i, -1, 2]
+        last_dir_in_X   = X[i, -1, 3]
+        label_speed, label_dir = Y[i]
+        print(
+            f"sample {i}: last_speed_in_X={last_speed_in_X:.4f}, "
+            f"label_speed(+1 step)={label_speed:.4f} | "
+            f"last_dir_in_X={last_dir_in_X:.2f}, "
+            f"label_dir(+1 step)={label_dir:.2f}"
+        )
 
     return X, Y
 
@@ -358,7 +386,18 @@ if __name__ == '__main__':
     X_test, Y_test   = filter_invalid_samples(X_test, Y_test)
     print(f"{farm}/{turbine_id} -> X_train: {X_train.shape}, Y_train: {Y_train.shape}, "
           f"X_test: {X_test.shape}, Y_test: {Y_test.shape}")
-
+    # === debug 3: 再次确认窗口级输入 / 标签 ===
+    print("=== debug 3: final train set check ===")
+    for i in range(min(5, X_train.shape[0])):
+        last_speed = X_train[i, -1, 2]
+        last_dir   = X_train[i, -1, 3]
+        label_speed, label_dir = Y_train[i]
+        print(
+            f"[final] sample {i}: last_speed_in_X={last_speed:.4f}, "
+            f"label_speed(+1)={label_speed:.4f} | "
+            f"last_dir_in_X={last_dir:.2f}, "
+            f"label_dir(+1)={label_dir:.2f}"
+        )
     # 4) 创建模型
     m = Time2GraphWindModel(
         K=args.K,
@@ -379,8 +418,8 @@ if __name__ == '__main__':
         transformer_ff=args.transformer_ff,
         dropout=args.dropout,
         verbose=True,
-        shapelets_cache='{}/scripts/cache/{}_{}_{}_{}_shapelets.cache'.format(
-            module_path, args.dataset, args.cmethod, args.K, args.seg_length)
+        shapelets_cache='{}/scripts/cache/{}/{}_{}_{}_{}_shapelets.cache'.format(
+            module_path, farm ,turbine_id ,args.cmethod, args.K, args.seg_length)
     )
 
     # 5) 训练并保存模型（缓存路径带上风场和风机）
@@ -409,9 +448,17 @@ if __name__ == '__main__':
     Debugger.info_print(f"模型已保存到: {model_path}")
 
     # 6) 预测结果
-    print("开始预测...")
-    y_pred = m.predict(X_test)  # (N_test, 2)
-
+    # print("开始预测...")
+    # y_pred = m.predict(X_test)  # (N_test, 2)
+    print("开始预测（分批）...")
+    all_preds = []
+    batch = 256
+    N = X_test.shape[0]
+    for i in range(0, N, batch):
+        x_batch = X_test[i:i+batch]
+        preds = m.predict(x_batch)
+        all_preds.append(preds)
+    y_pred = np.vstack(all_preds)
     # 计算风速的 RMSE 和 MAE
     wind_speed_pred = y_pred[:, 0]  # 假设风速是预测的第一个列
     wind_speed_true = Y_test[:, 0]

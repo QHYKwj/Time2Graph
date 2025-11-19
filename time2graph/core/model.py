@@ -12,43 +12,69 @@ from time2graph.utils.base_utils import Debugger
 
 class ShapeletSeqRegressor(nn.Module):
     """
-    使用 Transformer + MLP 处理 shapelet 序列，输出风速、风向两个值。
-    输入:  (B, S, D)  S为segment数, D为每个segment的embedding维度
-    输出:  (B, 2)    分别为风速和风向的回归值
+    使用 Transformer + mean+max pooling + 简化版 MLP。
+    输入:  (B, S, D)
+    输出:  (B, 2)  -> 风速、风向
     """
     def __init__(self, embed_dim, num_heads=4, num_layers=2,
-                 ff_hidden_dim=256, dropout=0.1):
+                 ff_hidden_dim=256, dropout=0.1, debug=False):
         super().__init__()
+
+        # === Transformer Encoder ===
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
             dim_feedforward=ff_hidden_dim,
             dropout=dropout,
-            batch_first=True  # PyTorch 1.10+ 支持
+            batch_first=True
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=num_layers
         )
-        # 用 mean-pooling 聚合所有 segment
-        self.pool = lambda x: x.mean(dim=1)  # (B, S, D) -> (B, D)
 
+        # === debug 配置 ===
+        self.debug = debug
+        self.register_buffer("debug_printed", torch.zeros(1, dtype=torch.bool))
+
+        # === 简单 MLP（删掉一层）===
+        # 输入维度 = mean + max pooling，所以是 2 * embed_dim
         self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, ff_hidden_dim),
+            nn.Linear(2 * embed_dim, ff_hidden_dim),
             nn.ReLU(),
-            nn.Linear(ff_hidden_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 2)  # 输出: [风速, 风向] 或 [v, θ] / [v, cosθ] 等
+            nn.Linear(ff_hidden_dim, 2)   # 最后一层直接输出风速、风向
         )
 
     def forward(self, seq_emb):
         """
         seq_emb: (B, S, D)
         """
-        enc = self.encoder(seq_emb)       # (B, S, D)
-        pooled = self.pool(enc)          # (B, D)
-        out = self.mlp(pooled)           # (B, 2)
+        B, S, D = seq_emb.shape
+
+        # Debug — 只打印一次
+        if self.debug and not bool(self.debug_printed.item()):
+            with torch.no_grad():
+                print(f"[DEBUG] forward: seq_emb=(B={B}, S={S}, D={D})")
+                if B >= 2:
+                    x0 = seq_emb[0].cpu()
+                    x1 = seq_emb[1].cpu()
+                    print(f"[DEBUG] sample0 mean/std = {x0.mean():.6f}/{x0.std():.6f}")
+                    print(f"[DEBUG] sample1 mean/std = {x1.mean():.6f}/{x1.std():.6f}")
+                    print(f"[DEBUG] L2 distance(sample0,sample1)= {torch.norm(x0 - x1):.6f}")
+            self.debug_printed[...] = True
+
+        # === Transformer 编码 ===
+        enc = self.encoder(seq_emb)  # (B, S, D)
+
+        # === mean + max pooling（特征更强）===
+        mean_pool = enc.mean(dim=1)     # (B, D)
+        max_pool, _ = enc.max(dim=1)    # (B, D)
+        pooled = torch.cat([mean_pool, max_pool], dim=-1)   # (B, 2D)
+
+        # === 简化 MLP ===
+        out = self.mlp(pooled)   # (B, 2)
         return out
+
 
 
 class Time2GraphWindModel(object):
@@ -138,11 +164,25 @@ class Time2GraphWindModel(object):
         """
         学 shapelet + 图嵌入 (DeepWalk)，只做一次。
         """
+         # -------- 1) 先保证有个合法的 y 给 shapelet 学习 --------
+        if Y is None:
+            # 无监督：随便给一类，长度和 X 样本数一致
+            y_for_shapelet = np.zeros(X.shape[0], dtype=int)
+        else:
+            # 有监督：如果你以后想用分类标签，可以在这里处理
+            Y_arr = np.asarray(Y)
+            if Y_arr.ndim == 2:
+                # 比如回归标签 (N,2)，我们随便用第一个维度离散化一下
+                # 这里简单一点，直接全 0 也可以
+                y_for_shapelet = np.zeros(Y_arr.shape[0], dtype=int)
+            else:
+                y_for_shapelet = Y_arr.astype(int)
+                
         if self.t2g.shapelets is None:
             Debugger.info_print('learning shapelets...')
             self.t2g.learn_shapelets(
                 x=X,
-                y=Y,
+                y=y_for_shapelet,
                 num_segment=self.num_segment,
                 data_size=self.data_size,
                 num_batch=int(X.shape[0] // self.batch_size)
@@ -156,7 +196,7 @@ class Time2GraphWindModel(object):
             Debugger.info_print('training embedding model (DeepWalk)...')
             self.t2g.fit_embedding_model(
                 x=X,
-                y=Y,
+                y=y_for_shapelet,
                 cache_dir=cache_dir
             )
 
@@ -175,6 +215,12 @@ class Time2GraphWindModel(object):
             "total embedding dim must be divisible by num_segment"
         D_emb = total_dim // self.num_segment
         seq = emb.reshape(N, self.num_segment, D_emb)  # (N, S, D)
+        
+         # 简单 debug：看下前两个样本的差异
+        if N >= 2:
+            diff = np.linalg.norm(seq[0] - seq[1])
+            Debugger.info_print(f"[DEBUG] seq_emb[0] vs seq_emb[1] L2 = {diff:.6f}")
+        
         seq_tensor = torch.from_numpy(seq).float().to(self.device)
         return seq_tensor, D_emb
 
@@ -211,7 +257,8 @@ class Time2GraphWindModel(object):
                 num_heads=self.transformer_heads,
                 num_layers=self.transformer_layers,
                 ff_hidden_dim=self.transformer_ff,
-                dropout=self.dropout
+                dropout=self.dropout,
+                debug=True   # 先开着调试
             ).to(self.device)
 
         # 准备优化器和损失

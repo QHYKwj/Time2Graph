@@ -215,28 +215,28 @@ class ModelUtils(object):
         else:
             raise NotImplementedError('unsupported metric {}'.format(opt_metric))
 
-    # def transformer_regressor_paras(self):
-    #     """
-    #     为 Time2GraphWindModel 的 Transformer 部分生成参数
-    #     """
-    #     num_heads = self.kwargs.get('num_heads', [4, 8])
-    #     num_layers = self.kwargs.get('num_layers', [2, 4])
-    #     ff_hidden_dim = self.kwargs.get('ff_hidden_dim', [256, 512])
-    #     dropout = self.kwargs.get('dropout', [0.1, 0.2, 0.3])
-    #     lr = self.kwargs.get('lr', [1e-3, 1e-4])
-    #     batch_size = self.kwargs.get('batch_size', [32, 64])
+    def transformer_regressor_paras(self):
+        """
+        为 Time2GraphWindModel 的 Transformer 部分生成参数
+        """
+        num_heads = self.kwargs.get('num_heads', [4, 8])
+        num_layers = self.kwargs.get('num_layers', [2, 4])
+        ff_hidden_dim = self.kwargs.get('ff_hidden_dim', [256, 512])
+        dropout = self.kwargs.get('dropout', [0.1, 0.2, 0.3])
+        lr = self.kwargs.get('lr', [1e-3, 1e-4])
+        batch_size = self.kwargs.get('batch_size', [32, 64])
         
-    #     for (p1, p2, p3, p4, p5, p6) in itertools.product(
-    #             num_heads, num_layers, ff_hidden_dim, dropout, lr, batch_size
-    #     ):
-    #         yield {
-    #             'num_heads': p1,
-    #             'num_layers': p2,
-    #             'ff_hidden_dim': p3,
-    #             'dropout': p4,
-    #             'lr': p5,
-    #             'batch_size': p6
-    #         }
+        for (p1, p2, p3, p4, p5, p6) in itertools.product(
+                num_heads, num_layers, ff_hidden_dim, dropout, lr, batch_size
+        ):
+            yield {
+                'num_heads': p1,
+                'num_layers': p2,
+                'ff_hidden_dim': p3,
+                'dropout': p4,
+                'lr': p5,
+                'batch_size': p6
+            }
 
     def load_model(self, fpath, **kwargs):
         pass

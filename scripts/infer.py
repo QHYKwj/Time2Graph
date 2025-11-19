@@ -100,10 +100,10 @@ if __name__ == "__main__":
     )
 
     # 2) 构造 Time2GraphWindModel（一定要和训练 run2.py 的参数一致！！）
-    seg_length = 24      # 保证 seg_length * num_segment == 1 小时时间点数
-    num_segment = 5      # 24 * 5 = 120
-    K = 50
-    C = 500
+    seg_length = 5      # 保证 seg_length * num_segment == 1 小时时间点数
+    num_segment = 4      # 24 * 5 = 120
+    K = 10
+    C = 300
     percentile = 5
 
     m = Time2GraphWindModel(
@@ -125,8 +125,8 @@ if __name__ == "__main__":
         transformer_ff=256,
         dropout=0.1,
         verbose=True,
-        shapelets_cache='{}/scripts/cache/{}_{}_{}_{}_shapelets.cache'.format(
-            module_path, 'ucr-Earthquakes', 'greedy', K, seg_length
+        shapelets_cache='{}/scripts/cache/{}/{}_{}_{}_{}_shapelets.cache'.format(
+            module_path, farm, turbine_id,'greedy', K, seg_length
         )
     )
 
@@ -162,6 +162,7 @@ if __name__ == "__main__":
 
     print(f"开始自回归预测 {horizon_steps} 步...")
 
+    prev_v = None
     for k in range(horizon_steps):
         # 取最近 L_required 个点作为输入窗口
         win_turb = cur_turb[-L_required:, :]   # (L, 4)
@@ -178,6 +179,15 @@ if __name__ == "__main__":
         y_step = m.predict(X_win)[0]   # (2,)
         v_pred = float(y_step[0])
         dir_pred = float(y_step[1])
+
+        # === DEBUG 打印 ===
+        last_speed_in_win = win_turb[-1, 2]
+        print(f"[step {k}] last_speed_in_win={last_speed_in_win:.6f}, "
+              f"v_pred={v_pred:.6f}, dir_pred={dir_pred:.6f}")
+        if prev_v is not None:
+            print(f"    Δv_pred={v_pred - prev_v:.6e}")
+        prev_v = v_pred
+        # ==================
 
         pred_speed_list.append(v_pred)
         pred_dir_list.append(dir_pred)
