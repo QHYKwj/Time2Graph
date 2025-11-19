@@ -5,6 +5,7 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from ...utils.base_utils import Debugger
 """
     utils for deep models.
@@ -44,7 +45,9 @@ def train_RNNs(epoch, dataloader, rnn, criterion, optimizer, debug, gpu_enable):
         sequences = Variable(sequences)
         target = Variable(target)
         output = rnn(sequences)
+        # 使用 MSE 或 MAE 作为损失函数
         loss = criterion(output, target)
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -72,41 +75,72 @@ def train_VAE(epoch, dataloader, vae, criterion, optimizer, debug, gpu_enable):
                 epoch, i, len(dataloader), loss.item()), debug=debug)
 
 
+# def test_DeepModels(dataloader, rnn, criterion, debug, gpu_enable):
+    # for th in range(5, 20, 1):
+    #     test_loss = 0
+    #     correct = 0
+    #     rnn.eval()
+    #     y_pred, y_test = [], []
+    #     th = th / 20
+    #     for i, (sequences, target) in enumerate(dataloader, 0):
+    #         rnn.zero_grad()
+    #         sequences = sequences.double()
+    #         if gpu_enable:
+    #             sequences = sequences.cuda()
+    #             target = target.cuda()
+    #         sequences = Variable(sequences)
+    #         target = Variable(target)
+    #         output = rnn(sequences)
+    #         test_loss += criterion(output, target).item()
+    #         # pred = F.softmax(output, dim=1).data.max(1, keepdim=True)[1]
+    #         pred = F.softmax(output, dim=1)[:, 1].data.cpu().numpy()
+    #         print(pred)
+    #         tmp = np.zeros(len(pred))
+    #         tmp[pred >= th] = 1
+    #         # y_pred += list(pred.cpu().numpy())
+    #         y_pred += list(tmp)
+    #         y_test += list(target.cpu().numpy())
+    #         # correct += pred.eq(target.data.view_as(pred)).cpu().sum()
+    #     test_loss /= len(dataloader.dataset)
+    #     y_pred, y_test = np.array(y_pred, dtype=np.int).reshape(-1), np.array(y_test, dtype=np.int).reshape(-1)
+    #     accu = accuracy_score(y_true=y_test, y_pred=y_pred)
+    #     prec = precision_score(y_true=y_test, y_pred=y_pred)
+    #     recall = recall_score(y_true=y_test, y_pred=y_pred)
+    #     f1 = f1_score(y_true=y_test, y_pred=y_pred)
+    #     Debugger.info_print('res: accu {:.4f}, prec {:.4f}, recall {:.4f}, f1 {:.4f}'.format(
+    #         accu, prec, recall, f1
+    #     ))
+    #     Debugger.debug_print('Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)'.format(
+    #         test_loss, correct, len(dataloader.dataset),
+    #         100. * correct / len(dataloader.dataset)), debug=debug)
+
+
 def test_DeepModels(dataloader, rnn, criterion, debug, gpu_enable):
-    for th in range(5, 20, 1):
-        test_loss = 0
-        correct = 0
-        rnn.eval()
-        y_pred, y_test = [], []
-        th = th / 20
-        for i, (sequences, target) in enumerate(dataloader, 0):
-            rnn.zero_grad()
-            sequences = sequences.double()
-            if gpu_enable:
-                sequences = sequences.cuda()
-                target = target.cuda()
-            sequences = Variable(sequences)
-            target = Variable(target)
-            output = rnn(sequences)
-            test_loss += criterion(output, target).item()
-            # pred = F.softmax(output, dim=1).data.max(1, keepdim=True)[1]
-            pred = F.softmax(output, dim=1)[:, 1].data.cpu().numpy()
-            print(pred)
-            tmp = np.zeros(len(pred))
-            tmp[pred >= th] = 1
-            # y_pred += list(pred.cpu().numpy())
-            y_pred += list(tmp)
-            y_test += list(target.cpu().numpy())
-            # correct += pred.eq(target.data.view_as(pred)).cpu().sum()
-        test_loss /= len(dataloader.dataset)
-        y_pred, y_test = np.array(y_pred, dtype=np.int).reshape(-1), np.array(y_test, dtype=np.int).reshape(-1)
-        accu = accuracy_score(y_true=y_test, y_pred=y_pred)
-        prec = precision_score(y_true=y_test, y_pred=y_pred)
-        recall = recall_score(y_true=y_test, y_pred=y_pred)
-        f1 = f1_score(y_true=y_test, y_pred=y_pred)
-        Debugger.info_print('res: accu {:.4f}, prec {:.4f}, recall {:.4f}, f1 {:.4f}'.format(
-            accu, prec, recall, f1
-        ))
-        Debugger.debug_print('Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)'.format(
-            test_loss, correct, len(dataloader.dataset),
-            100. * correct / len(dataloader.dataset)), debug=debug)
+    rnn.eval()
+    y_pred, y_test = [], []
+    test_loss = 0
+
+    for i, (sequences, target) in enumerate(dataloader, 0):
+        rnn.zero_grad()
+        sequences = sequences.double()
+        if gpu_enable:
+            sequences = sequences.cuda()
+            target = target.cuda()
+        sequences = Variable(sequences)
+        target = Variable(target)
+        output = rnn(sequences)
+
+        # 计算回归任务的损失
+        loss = criterion(output, target)
+        test_loss += loss.item()
+
+        # 直接返回回归值
+        y_pred += output.cpu().data.numpy().tolist()
+        y_test += target.cpu().data.numpy().tolist()
+
+    # 计算 MSE 和 MAE
+    test_loss /= len(dataloader.dataset)
+    mse = mean_squared_error(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+
+    Debugger.info_print(f"Test set: Average loss: {test_loss:.4f}, MSE: {mse:.4f}, MAE: {mae:.4f}")

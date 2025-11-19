@@ -4,7 +4,7 @@ import time
 import itertools
 import psutil
 from subprocess import *
-
+import numpy as np  # 添加 numpy 导入
 
 class ModelUtils(object):
     """
@@ -46,17 +46,23 @@ class ModelUtils(object):
             from sklearn.linear_model import LogisticRegression
             return LogisticRegression
         elif self.kernel == 'svm':
-            from sklearn.svm import SVC
-            return SVC
+            # from sklearn.svm import SVC
+            # return SVC
+            from sklearn.svm import SVR  # 使用支持回归的支持向量机
+            return SVR
         elif self.kernel == 'dts':
-            from sklearn.tree import DecisionTreeClassifier
-            return DecisionTreeClassifier
+            # from sklearn.tree import DecisionTreeClassifier
+            from sklearn.tree import DecisionTreeRegressor  # 使用回归树
+            return DecisionTreeRegressor
         elif self.kernel == 'rf':
-            from sklearn.ensemble import RandomForestClassifier
-            return RandomForestClassifier
+            from sklearn.ensemble import RandomForestRegressor  # 使用回归森林
+            # from sklearn.ensemble import RandomForestClassifier
+            return RandomForestRegressor
         elif self.kernel == 'xgb':
-            from xgboost import XGBClassifier
-            return XGBClassifier
+            # from xgboost import XGBClassifier
+            # return XGBClassifier
+            from xgboost import XGBRegressor # 使用XGB回归
+            return XGBRegressor
         else:
             raise NotImplementedError('unsupported kernel {}'.format(self.kernel))
 
@@ -77,7 +83,7 @@ class ModelUtils(object):
                     'penalty': p1,
                     'C': p2,
                     'intercept_scaling': p3,
-                    'class_weight': class_weight
+                    # 'class_weight': class_weight
                 }
         elif self.kernel == 'rf' or self.kernel == 'dts':
             criteria = self.kwargs.get('criteria', ['gini', 'entropy'])
@@ -94,14 +100,31 @@ class ModelUtils(object):
                     'max_depth': p3,
                     'min_samples_split': p4,
                     'min_samples_leaf': p5,
-                    'class_weight': class_weight
+                    # 'class_weight': class_weight
                 }
+        # elif self.kernel == 'xgb':
+        #     max_depth = self.kwargs.get('max_depth', [1, 2, 4, 8, 12, 16])
+        #     learning_rate = self.kwargs.get('learning_rate', [0.1, 0.2, 0.3])
+        #     n_jobs = [self.kwargs.get('n_jobs', psutil.cpu_count())]
+        #     class_weight = self.kwargs.get('class_weight', [1, 10, 50, 100])
+        #     booster = self.kwargs.get('booster', ['gblinear', 'gbtree', 'dart'])
+        #     for (p1, p2, p3, p4, p5) in itertools.product(
+        #             max_depth, learning_rate, booster, n_jobs, class_weight
+        #     ):
+        #         yield {
+        #             'max_depth': p1,
+        #             'learning_rate': p2,
+        #             'booster': p3,
+        #             'n_jobs': p4,
+        #             'scale_pos_weight': p5
+        #         }
         elif self.kernel == 'xgb':
-            max_depth = self.kwargs.get('max_depth', [1, 2, 4, 8, 12, 16])
-            learning_rate = self.kwargs.get('learning_rate', [0.1, 0.2, 0.3])
+            max_depth = self.kwargs.get('max_depth', [4])          # 原来 6 个 → 1 个
+            learning_rate = self.kwargs.get('learning_rate', [0.1])# 原来 3 个 → 1 个
             n_jobs = [self.kwargs.get('n_jobs', psutil.cpu_count())]
-            class_weight = self.kwargs.get('class_weight', [1, 10, 50, 100])
-            booster = self.kwargs.get('booster', ['gblinear', 'gbtree', 'dart'])
+            class_weight = self.kwargs.get('class_weight', [1])    # 原来 4 个 → 1 个
+            booster = self.kwargs.get('booster', ['gbtree'])       # 原来 3 个 → 1 个
+
             for (p1, p2, p3, p4, p5) in itertools.product(
                     max_depth, learning_rate, booster, n_jobs, class_weight
             ):
@@ -110,7 +133,7 @@ class ModelUtils(object):
                     'learning_rate': p2,
                     'booster': p3,
                     'n_jobs': p4,
-                    'scale_pos_weight': p5
+                    # 'scale_pos_weight': p5
                 }
         elif self.kernel == 'svm':
             c = self.kwargs.get('c', [pow(2, i) for i in range(-2, 2)])
@@ -119,7 +142,7 @@ class ModelUtils(object):
                 yield {
                     'C': p1,
                     'kernel': p2,
-                    'class_weight': class_weight
+                    # 'class_weight': class_weight
                     }
         else:
             raise NotImplementedError()
@@ -168,17 +191,52 @@ class ModelUtils(object):
             }
 
     def return_metric_method(self, opt_metric):
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-        if opt_metric == 'accuracy':
-            return accuracy_score
-        elif opt_metric == 'precision':
-            return precision_score
-        elif opt_metric == 'recall':
-            return recall_score
-        elif opt_metric == 'f1':
-            return f1_score
+        # from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        # if opt_metric == 'accuracy':
+        #     return accuracy_score
+        # elif opt_metric == 'precision':
+        #     return precision_score
+        # elif opt_metric == 'recall':
+        #     return recall_score
+        # elif opt_metric == 'f1':
+        #     return f1_score
+        # else:
+        #     raise NotImplementedError('unsupported metric {}'.format(opt_metric))
+        from sklearn.metrics import mean_squared_error, r2_score,mean_absolute_error
+        if opt_metric == 'mse':  # 均方误差
+            return mean_squared_error
+        elif opt_metric == 'rmse':
+            # RMSE = sqrt(MSE)
+            return lambda y_true, y_pred: np.sqrt(mean_squared_error(y_true, y_pred))
+        elif opt_metric == 'r2':  # 决定系数
+            return r2_score
+        elif opt_metric == 'mae':
+            return mean_absolute_error
         else:
             raise NotImplementedError('unsupported metric {}'.format(opt_metric))
+
+    # def transformer_regressor_paras(self):
+    #     """
+    #     为 Time2GraphWindModel 的 Transformer 部分生成参数
+    #     """
+    #     num_heads = self.kwargs.get('num_heads', [4, 8])
+    #     num_layers = self.kwargs.get('num_layers', [2, 4])
+    #     ff_hidden_dim = self.kwargs.get('ff_hidden_dim', [256, 512])
+    #     dropout = self.kwargs.get('dropout', [0.1, 0.2, 0.3])
+    #     lr = self.kwargs.get('lr', [1e-3, 1e-4])
+    #     batch_size = self.kwargs.get('batch_size', [32, 64])
+        
+    #     for (p1, p2, p3, p4, p5, p6) in itertools.product(
+    #             num_heads, num_layers, ff_hidden_dim, dropout, lr, batch_size
+    #     ):
+    #         yield {
+    #             'num_heads': p1,
+    #             'num_layers': p2,
+    #             'ff_hidden_dim': p3,
+    #             'dropout': p4,
+    #             'lr': p5,
+    #             'batch_size': p6
+    #         }
 
     def load_model(self, fpath, **kwargs):
         pass

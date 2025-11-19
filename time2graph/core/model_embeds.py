@@ -8,6 +8,7 @@ from sklearn.preprocessing import normalize
 from .time_aware_shapelets import learn_time_aware_shapelets
 from .shapelet_embedding import ShapeletEmbedding
 from ..utils.base_utils import ModelUtils, Debugger
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 
 class Time2GraphEmbed(ModelUtils):
@@ -93,7 +94,7 @@ class Time2GraphEmbed(ModelUtils):
             cache_dir=cache_dir, tanh=self.kwargs.get('tanh', False), debug=self.debug,
             percentile=self.percentile, measurement=self.measurement, mode=self.mode,
             global_flag=self.global_flag, **self.kwargs)
-        self.sembeds.fit(time_series_set=x[np.argwhere(y == 0).reshape(-1), :, :],
+        self.sembeds.fit(time_series_set=x,
                          shapelets=self.shapelets, warp=self.warp, init=init)
 
     def embed(self, x, init=0):
@@ -104,109 +105,196 @@ class Time2GraphEmbed(ModelUtils):
         for key, val in dw_args.items():
             self.kwargs[key] = val
 
+    # def fit(self, X, Y, n_splits=5, init=0, reset=True, balanced=True, norm=False,
+    #         cache_dir='./', **kwargs):
+    #     """
+    #     fit the whole embeds model.
+    #     :param X:
+    #         input time series data.
+    #     :param Y:
+    #         input label.
+    #     :param n_splits:
+    #         number of splits in cross validation.
+    #     :param init:
+    #         init index. default as 0.
+    #     :param reset:
+    #         bool, whether to reset shapelets or embedding cache.
+    #         if True, re-learn shapelets and their embeddings.
+    #     :param balanced:
+    #         bool, whether to balance the pos/neg during fitting classifier.
+    #     :param norm:
+    #         whether to norm the embeddings.
+    #     :param cache_dir:
+    #         cache directory for edge-list and embeddings.
+    #     :param kwargs:
+    #         tuning: bool, whether to tune the parameters of outer-classifier(xgb).
+    #         opt_args: dict, if tuning is False, opt_args must be given that
+    #             the optimal parameters of outer-classifier should be pre-defined.
+    #     :return:
+    #     """
+    #     num_segment = int(X.shape[1] / self.seg_length)
+    #     data_size = X.shape[-1]
+    #     if reset or self.shapelets is None:
+    #         self.learn_shapelets(
+    #             x=X, y=Y, num_segment=num_segment, data_size=data_size, num_batch=X.shape[0] // self.batch_size)
+    #     if reset or self.sembeds is None:
+    #         Debugger.info_print('fit embedding model...')
+    #         self.fit_embedding_model(x=X, y=Y, cache_dir=cache_dir, init=init)
+    #     max_clf_args, max_metric, clf = None, -1, self.clf__()
+    #     embeds = self.sembeds.time_series_embedding(
+    #         time_series_set=X, shapelets=self.shapelets,
+    #         warp=self.warp, init=init)
+    #     if norm:
+    #         embeds = normalize(embeds, axis=0)
+    #     #计算模型输出
+    #     Debugger.info_print('{} paras to be tuned'.format(self.para_len(balanced=balanced)))
+    #     arguments = self.clf_paras(balanced=balanced)
+    #     arg_size, cnt = self.para_len(balanced=balanced), 0.0
+    #     metric_method = self.return_metric_method(opt_metric=self.opt_metric)
+
+    #     tuning, opt_args = kwargs.get('tuning', True), kwargs.get('opt_args', None)
+    #     if tuning:
+    #         Debugger.info_print('running parameter tuning for fit...')
+    #         max_accu, max_prec, max_recall, max_f1, max_clf_model = -1, -1, -1, -1, None
+    #         for args in arguments:
+    #             clf.set_params(**args)
+    #             Debugger.debug_print(msg='{:.2f}% inner args tuned; args: {}'.format(cnt * 100.0 / arg_size, args),
+    #                                  debug=self.debug)
+    #             skf = StratifiedKFold(n_splits=n_splits, shuffle=True)
+    #             tmp, accu, prec, recall, f1 = 0, 0, 0, 0, 0
+    #             for train_idx, test_idx in skf.split(embeds, Y):
+    #                 clf.fit(embeds[train_idx], Y[train_idx])
+    #                 y_true, y_pred = Y[test_idx], clf.predict(embeds[test_idx])
+    #                 tmp += metric_method(y_true=y_true, y_pred=y_pred)
+    #                 accu += accuracy_score(y_true=y_true, y_pred=y_pred)
+    #                 prec += precision_score(y_true=y_true, y_pred=y_pred)
+    #                 recall += recall_score(y_true=y_true, y_pred=y_pred)
+    #                 f1 += f1_score(y_true=y_true, y_pred=y_pred)
+    #             tmp /= n_splits
+    #             accu /= n_splits
+    #             prec /= n_splits
+    #             recall /= n_splits
+    #             f1 /= n_splits
+    #             if max_metric < tmp:
+    #                 max_metric, max_clf_args, max_clf_model = tmp, args, deepcopy(clf)
+    #                 max_accu, max_prec, max_recall, max_f1 = accu, prec, recall, f1
+    #             cnt += 1.0
+    #         if self.verbose:
+    #             Debugger.info_print('args {} for clf {}-{}, performance: {:.4f}, {:.4f}, {:.4f}, {:.4f}'.format(
+    #                 max_clf_args, self.kernel, self.opt_metric, max_accu, max_prec, max_recall, max_f1))
+    #         self.clf = {'clf': max_clf_model, 'clf-args': max_clf_args}
+    #     else:
+    #         assert opt_args is not None, 'missing opt args specified'
+    #         clf.set_params(**opt_args)
+    #         skf = StratifiedKFold(n_splits=n_splits, shuffle=True)
+    #         tmp = np.zeros(5, dtype=np.float32).reshape(-1)
+    #         measure_vector = [metric_method, accuracy_score, precision_score, recall_score, f1_score]
+    #         for train_idx, test_idx in skf.split(embeds, Y):
+    #             clf.fit(embeds[train_idx], Y[train_idx])
+    #             y_pred, y_true = clf.predict(embeds[test_idx]), Y[test_idx]
+    #             for k in range(5):
+    #                 tmp[k] += measure_vector[k](y_true=y_true, y_pred=y_pred)
+    #         tmp /= n_splits
+    #         if self.verbose:
+    #             Debugger.info_print('args {} for clf {}, performance: {:.4f}, {:.4f}, {:.4f}, {:.4f}'.format(
+    #                 opt_args, self.kernel, tmp[1], tmp[2], tmp[3], tmp[4]))
+    #         self.clf = {'clf': clf, 'clf-args': opt_args}
+    #     self.clf['clf'].fit(X, Y)
+    #     #计算模型输出（回归）
+        
+
+    # def predict(self, X, norm=False):
+    #     assert self.shapelets is not None, 'shapelets has not been learnt yet...'
+    #     assert self.clf is not 'classifier has not been learnt yet...'
+    #     if norm:
+    #         embeds = normalize(self.embed(x=X), axis=0)
+    #     else:
+    #         embeds = self.embed(x=X)
+    #     return self.clf['clf'].predict(embeds)
+
     def fit(self, X, Y, n_splits=5, init=0, reset=True, balanced=True, norm=False,
-            cache_dir='./', **kwargs):
+        cache_dir='./', **kwargs):
         """
-        fit the whole embeds model.
-        :param X:
-            input time series data.
-        :param Y:
-            input label.
-        :param n_splits:
-            number of splits in cross validation.
-        :param init:
-            init index. default as 0.
-        :param reset:
-            bool, whether to reset shapelets or embedding cache.
-            if True, re-learn shapelets and their embeddings.
-        :param balanced:
-            bool, whether to balance the pos/neg during fitting classifier.
-        :param norm:
-            whether to norm the embeddings.
-        :param cache_dir:
-            cache directory for edge-list and embeddings.
-        :param kwargs:
-            tuning: bool, whether to tune the parameters of outer-classifier(xgb).
-            opt_args: dict, if tuning is False, opt_args must be given that
-                the optimal parameters of outer-classifier should be pre-defined.
-        :return:
+        fit the whole embeds model for regression.
+        :param X: input time series data.
+        :param Y: input labels (regression targets).
         """
         num_segment = int(X.shape[1] / self.seg_length)
         data_size = X.shape[-1]
+        
         if reset or self.shapelets is None:
-            self.learn_shapelets(
-                x=X, y=Y, num_segment=num_segment, data_size=data_size, num_batch=X.shape[0] // self.batch_size)
+            self.learn_shapelets(x=X, y=Y, num_segment=num_segment, data_size=data_size, num_batch=X.shape[0] // self.batch_size)
         if reset or self.sembeds is None:
             Debugger.info_print('fit embedding model...')
             self.fit_embedding_model(x=X, y=Y, cache_dir=cache_dir, init=init)
+        
         max_clf_args, max_metric, clf = None, -1, self.clf__()
-        embeds = self.sembeds.time_series_embedding(
-            time_series_set=X, shapelets=self.shapelets,
-            warp=self.warp, init=init)
+        embeds = self.sembeds.time_series_embedding(time_series_set=X, shapelets=self.shapelets, warp=self.warp, init=init)
+        
         if norm:
             embeds = normalize(embeds, axis=0)
+        
+        # 计算模型输出
         Debugger.info_print('{} paras to be tuned'.format(self.para_len(balanced=balanced)))
         arguments = self.clf_paras(balanced=balanced)
         arg_size, cnt = self.para_len(balanced=balanced), 0.0
+        
+        # 修改这里，使用 MSE 和 MAE 代替分类任务的准确率、精确率等指标
         metric_method = self.return_metric_method(opt_metric=self.opt_metric)
 
         tuning, opt_args = kwargs.get('tuning', True), kwargs.get('opt_args', None)
+        
+        # 调参：fine-tuning to find optimal classifier parameters
         if tuning:
-            Debugger.info_print('running parameter tuning for fit...')
-            max_accu, max_prec, max_recall, max_f1, max_clf_model = -1, -1, -1, -1, None
+            arguments = self.clf_paras(balanced=balanced)
             for args in arguments:
-                clf.set_params(**args)
-                Debugger.debug_print(msg='{:.2f}% inner args tuned; args: {}'.format(cnt * 100.0 / arg_size, args),
-                                     debug=self.debug)
+                self.clf.set_params(**args)
                 skf = StratifiedKFold(n_splits=n_splits, shuffle=True)
-                tmp, accu, prec, recall, f1 = 0, 0, 0, 0, 0
+                tmp = np.zeros(5, dtype=np.float32).reshape(-1)
+                measure_vector = [metric_method, mean_squared_error, mean_absolute_error]
                 for train_idx, test_idx in skf.split(embeds, Y):
-                    clf.fit(embeds[train_idx], Y[train_idx])
-                    y_true, y_pred = Y[test_idx], clf.predict(embeds[test_idx])
-                    tmp += metric_method(y_true=y_true, y_pred=y_pred)
-                    accu += accuracy_score(y_true=y_true, y_pred=y_pred)
-                    prec += precision_score(y_true=y_true, y_pred=y_pred)
-                    recall += recall_score(y_true=y_true, y_pred=y_pred)
-                    f1 += f1_score(y_true=y_true, y_pred=y_pred)
+                    self.clf.fit(embeds[train_idx], Y[train_idx])
+                    y_true, y_pred = Y[test_idx], self.clf.predict(embeds[test_idx])
+                    for k in range(3):
+                        tmp[k] += measure_vector[k](y_true=y_true, y_pred=y_pred)
                 tmp /= n_splits
-                accu /= n_splits
-                prec /= n_splits
-                recall /= n_splits
-                f1 /= n_splits
-                if max_metric < tmp:
-                    max_metric, max_clf_args, max_clf_model = tmp, args, deepcopy(clf)
-                    max_accu, max_prec, max_recall, max_f1 = accu, prec, recall, f1
-                cnt += 1.0
-            if self.verbose:
-                Debugger.info_print('args {} for clf {}-{}, performance: {:.4f}, {:.4f}, {:.4f}, {:.4f}'.format(
-                    max_clf_args, self.kernel, self.opt_metric, max_accu, max_prec, max_recall, max_f1))
-            self.clf = {'clf': max_clf_model, 'clf-args': max_clf_args}
+                Debugger.debug_print(f'args tuning: MSE {tmp[1]:.4f}, MAE {tmp[2]:.4f}')
+                if max_metric < tmp[0]:
+                    max_metric = tmp[0]
+                    opt_args = args
+            self.clf.set_params(**opt_args)
+
+        # 在没有调参的情况下使用预定义的参数
         else:
             assert opt_args is not None, 'missing opt args specified'
-            clf.set_params(**opt_args)
+            self.clf.set_params(**opt_args)
             skf = StratifiedKFold(n_splits=n_splits, shuffle=True)
             tmp = np.zeros(5, dtype=np.float32).reshape(-1)
-            measure_vector = [metric_method, accuracy_score, precision_score, recall_score, f1_score]
+            measure_vector = [metric_method, mean_squared_error, mean_absolute_error]
             for train_idx, test_idx in skf.split(embeds, Y):
-                clf.fit(embeds[train_idx], Y[train_idx])
-                y_pred, y_true = clf.predict(embeds[test_idx]), Y[test_idx]
-                for k in range(5):
+                self.clf.fit(embeds[train_idx], Y[train_idx])
+                y_pred, y_true = self.clf.predict(embeds[test_idx]), Y[test_idx]
+                for k in range(3):
                     tmp[k] += measure_vector[k](y_true=y_true, y_pred=y_pred)
             tmp /= n_splits
             if self.verbose:
-                Debugger.info_print('args {} for clf {}, performance: {:.4f}, {:.4f}, {:.4f}, {:.4f}'.format(
-                    opt_args, self.kernel, tmp[1], tmp[2], tmp[3], tmp[4]))
-            self.clf = {'clf': clf, 'clf-args': opt_args}
-        self.clf['clf'].fit(X, Y)
+                Debugger.info_print(f'args {opt_args} for clf {self.kernel}, performance: MSE={tmp[1]:.4f}, MAE={tmp[2]:.4f}')
+        
+        # 使用最优参数在整个数据集上训练
+        self.clf.fit(embeds, Y)
 
     def predict(self, X, norm=False):
-        assert self.shapelets is not None, 'shapelets has not been learnt yet...'
-        assert self.clf is not 'classifier has not been learnt yet...'
+        assert self.shapelets is not None, 'shapelets have not been learnt yet...'
+        assert self.clf is not None, 'classifier has not been learnt yet...'
+        
         if norm:
             embeds = normalize(self.embed(x=X), axis=0)
         else:
             embeds = self.embed(x=X)
-        return self.clf['clf'].predict(embeds)
+        
+        # 返回连续的预测值（回归任务的风速和风向）
+        return self.clf.predict(embeds)  # 返回风速和风向的回归值
+
 
     def save_model(self, fpath, **kwargs):
         pickle.dump(self.__dict__, open(fpath, 'wb'))

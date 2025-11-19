@@ -9,6 +9,40 @@ from torch.autograd import Variable
 """
 
 
+# class LSTMClassifier(nn.Module):
+#     def __init__(self, data_size, hidden_size, output_size,
+#                  dropout, hidden_dim=128, gpu_enable=False):
+#         super(LSTMClassifier, self).__init__()
+#         self.data_size = data_size
+#         self.hidden_size = hidden_size
+#         self.output_size = output_size
+#         self.gpu_enable = gpu_enable
+#         self.model = nn.LSTM(data_size, hidden_size, batch_first=True).double()
+#         self.hidden2out = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_dim),
+#             nn.ReLU(),
+#             nn.Linear(hidden_dim, output_size)
+#         )
+#         self.dropout = nn.Dropout(p=dropout)
+
+#     def init_hidden(self, batch_size):
+#         if self.gpu_enable:
+#             return (
+#                 Variable(torch.zeros(1, batch_size, self.hidden_size).double().cuda()),
+#                 Variable(torch.zeros(1, batch_size, self.hidden_size).double().cuda())
+#             )
+#         else:
+#             return (
+#                 Variable(torch.zeros(1, batch_size, self.hidden_size).double()),
+#                 Variable(torch.zeros(1, batch_size, self.hidden_size).double())
+#             )
+
+#     def forward(self, X):
+#         hidden = self.init_hidden(batch_size=len(X))
+#         outputs, (h_n, c_n) = self.model(X.double(), hidden)
+#         # return self.softmax(self.hidden2out(outputs))
+#         return self.hidden2out(h_n[0])
+    
 class LSTMClassifier(nn.Module):
     def __init__(self, data_size, hidden_size, output_size,
                  dropout, hidden_dim=128, gpu_enable=False):
@@ -21,7 +55,7 @@ class LSTMClassifier(nn.Module):
         self.hidden2out = nn.Sequential(
             nn.Linear(hidden_size, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, output_size)
+            nn.Linear(hidden_dim, output_size)  # 直接输出回归值
         )
         self.dropout = nn.Dropout(p=dropout)
 
@@ -40,8 +74,7 @@ class LSTMClassifier(nn.Module):
     def forward(self, X):
         hidden = self.init_hidden(batch_size=len(X))
         outputs, (h_n, c_n) = self.model(X.double(), hidden)
-        # return self.softmax(self.hidden2out(outputs))
-        return self.hidden2out(h_n[0])
+        return self.hidden2out(h_n[0])  # 直接返回回归预测值
 
 
 class GRUClassifier(nn.Module):
@@ -111,8 +144,11 @@ class MLP(nn.Module):
         self.output_size = output_size
         self.hidden_layer = nn.Linear(data_size, hidden_size)
         self.output_layer = nn.Linear(hidden_size, output_size)
-        self.out = nn.Linear(output_size, n_class)
+        # self.out = nn.Linear(output_size, n_class)
 
     def forward(self, x):
-        x = x.view(self.batch_size, self.data_size)
-        return self.out(F.relu(self.output_layer(F.relu(self.hidden_layer(x)))))
+        # x = x.view(self.batch_size, self.data_size)
+        # return self.out(F.relu(self.output_layer(F.relu(self.hidden_layer(x)))))
+        x = x.view(x.size(0), -1)  # 展平输入
+        x = F.relu(self.hidden_layer(x))
+        return self.output_layer(x)  # 直接输出回归值

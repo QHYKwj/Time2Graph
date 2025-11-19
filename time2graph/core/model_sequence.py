@@ -8,7 +8,7 @@ from .rnn.deep_utils import DeepDataloader, DeepDataset, train_RNNs
 from .shapelet_utils import shapelet_distance
 from .time_aware_shapelets import learn_time_aware_shapelets
 from ..utils.base_utils import Debugger
-
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 class Time2GraphSequence(object):
     """
@@ -94,7 +94,8 @@ class Time2GraphSequence(object):
         else:
             raise NotImplementedError()
         self.rnns.double()
-        criterion = nn.CrossEntropyLoss()
+        # criterion = nn.CrossEntropyLoss()
+        criterion = nn.MSELoss()  # 修改为回归任务的损失函数
         optimizer = optim.Adam(self.rnns.parameters(), lr=self.lr)
         if self.gpu_enable:
             self.rnns.cuda()
@@ -105,11 +106,22 @@ class Time2GraphSequence(object):
         for epoch in range(self.niter):
             train_RNNs(epoch=epoch, dataloader=train_dataloader, rnn=self.rnns, criterion=criterion,
                        optimizer=optimizer, debug=self.debug, gpu_enable=self.gpu_enable)
+         # 添加回归评估
+        y_pred = self.rnns(sequences)  # 回归输出
+        mse = mean_squared_error(Y, y_pred.detach().cpu().numpy())  # 转为 numpy 进行评估
+        mae = mean_absolute_error(Y, y_pred.detach().cpu().numpy())
+        Debugger.info_print(f"Epoch {epoch} - MSE: {mse}, MAE: {mae}")
 
-    def predict(self, X, init):
+    # def predict(self, X, init):
         assert self.shapelets is not None, 'shapelets has not been learnt yet...'
         assert self.rnns is not None, 'classifier has not been learnt yet...'
         return self.rnns(self.retrieve_sequence(x=X, init=init), len(X))
+
+    def predict(self, X, init):
+        assert self.shapelets is not None, 'shapelets have not been learnt yet...'
+        assert self.rnns is not None, 'regressor has not been learnt yet...'
+        return self.rnns(self.retrieve_sequence(x=X, init=init), len(X))  # 直接返回回归值
+
 
     def dump_shapelets(self, fpath):
         pickle.dump(self.shapelets, open(fpath, 'wb'))

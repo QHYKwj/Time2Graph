@@ -87,3 +87,5 @@ ENV/
 
 # mkdocs documentation
 /site
+
+.pt
