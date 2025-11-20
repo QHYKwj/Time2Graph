@@ -301,7 +301,7 @@ if __name__ == '__main__':
     parser.add_argument('--beta', type=float, default=0.05, help='penalty parameter of global timing factor')
     parser.add_argument('--init', type=int, default=0, help='init index of time series data')
     parser.add_argument('--gpu_enable', action='store_true', default=False, help='bool, whether to use GPU')
-    parser.add_argument('--opt_metric', type=str, default='mse',
+    parser.add_argument('--opt_metric', type=str, default='mae',
                         help='which metric to optimize in prediction (rmse/mse/r2)')
 
     parser.add_argument('--cache', action='store_true', default=False,
@@ -357,11 +357,15 @@ if __name__ == '__main__':
     base_dir = '/mnt/e/Desktop/Xplanet/AI比赛/训练集'  # 根据您的数据目录调整
     
     # 设定每个风机的训练集结束日期（2019年6月30日）
-    train_end_date = "2019-06-30"
+
 
     # -------- 只跑一个风机：由参数控制，默认 风场1 / m01 --------
     farm = args.farm
     turbine_id = args.turbine_id
+    if farm=='风场1':
+        train_end_date = "2019-06-30"
+    else:
+        train_end_date = "2018-06-30"
     print(f"正在训练 {farm}/{turbine_id} 的模型...")
 
     # 1) 加载该风机的训练数据和测试数据

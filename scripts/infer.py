@@ -81,7 +81,7 @@ def load_infer_sample(base_dir,
 
 
 if __name__ == "__main__":
-    base_dir = '/mnt/e/Desktop/Xplanet/AI比赛/训练集'
+    base_dir = '/mnt/e/Desktop/Xplanet/AI比赛/预测数据/m01'
     farm = '风场1'
     turbine_id = 'm01'
 

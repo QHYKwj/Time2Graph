@@ -87,5 +87,4 @@ ENV/
 
 # mkdocs documentation
 /site
-
-.pt
+scripts/cache/

@@ -172,6 +172,9 @@ class ShapeletEmbedding(object):
                                   debug=self.debug, init=init, warp=warp,
                                   measurement=self.measurement, global_flag=self.global_flag)
         Debugger.info_print('embedding threshold {}'.format(self.dist_threshold))
+        print("[DEBUG] sdist stats: min={:.6f}, max={:.6f}, mean={:.6f}".format(
+            np.min(sdist), np.max(sdist), np.mean(sdist)
+        ))
         Debugger.info_print('sdist size {}'.format(sdist.shape))
         parmap = ParMap(
             work=time_series_embeds_factory__(

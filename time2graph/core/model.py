@@ -37,7 +37,7 @@ class ShapeletSeqRegressor(nn.Module):
         self.debug = debug
         self.register_buffer("debug_printed", torch.zeros(1, dtype=torch.bool))
 
-        # === 简单 MLP（删掉一层）===
+        # === 简单 MLP ===
         # 输入维度 = mean + max pooling，所以是 2 * embed_dim
         self.mlp = nn.Sequential(
             nn.Linear(2 * embed_dim, ff_hidden_dim),
