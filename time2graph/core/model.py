@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import pickle
+import torch.nn.functional as F
+import random
 from config import *
 from time2graph.core.model_embeds import Time2GraphEmbed
 from time2graph.utils.base_utils import Debugger
@@ -14,13 +16,12 @@ class ShapeletSeqRegressor(nn.Module):
     """
     使用 Transformer + mean+max pooling + 简化版 MLP。
     输入:  (B, S, D)
-    输出:  (B, 2)  -> 风速、风向
+    输出:  (B, 3)  -> [风速, cosθ, sinθ]
     """
     def __init__(self, embed_dim, num_heads=4, num_layers=2,
                  ff_hidden_dim=256, dropout=0.1, debug=False):
         super().__init__()
 
-        # === Transformer Encoder ===
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
@@ -33,21 +34,19 @@ class ShapeletSeqRegressor(nn.Module):
             num_layers=num_layers
         )
 
-        # === debug 配置 ===
         self.debug = debug
         self.register_buffer("debug_printed", torch.zeros(1, dtype=torch.bool))
 
-        # === 简单 MLP ===
         # 输入维度 = mean + max pooling，所以是 2 * embed_dim
         self.mlp = nn.Sequential(
             nn.Linear(2 * embed_dim, ff_hidden_dim),
             nn.ReLU(),
-            nn.Linear(ff_hidden_dim, 2)   # 最后一层直接输出风速、风向
+            nn.Linear(ff_hidden_dim, 3)   # 输出 [speed, cos, sin]
         )
 
-    def forward(self, seq_emb):
+    def encode(self, seq_emb):
         """
-        seq_emb: (B, S, D)
+        返回用于对比学习的特征向量 (B, 2*D)
         """
         B, S, D = seq_emb.shape
 
@@ -63,16 +62,20 @@ class ShapeletSeqRegressor(nn.Module):
                     print(f"[DEBUG] L2 distance(sample0,sample1)= {torch.norm(x0 - x1):.6f}")
             self.debug_printed[...] = True
 
-        # === Transformer 编码 ===
-        enc = self.encoder(seq_emb)  # (B, S, D)
-
-        # === mean + max pooling（特征更强）===
-        mean_pool = enc.mean(dim=1)     # (B, D)
-        max_pool, _ = enc.max(dim=1)    # (B, D)
+        enc = self.encoder(seq_emb)          # (B, S, D)
+        mean_pool = enc.mean(dim=1)         # (B, D)
+        max_pool, _ = enc.max(dim=1)        # (B, D)
         pooled = torch.cat([mean_pool, max_pool], dim=-1)   # (B, 2D)
+        return pooled
 
-        # === 简化 MLP ===
-        out = self.mlp(pooled)   # (B, 2)
+    def forward(self, seq_emb, return_feat=False):
+        """
+        return_feat=True 时同时返回 (output, feature)
+        """
+        pooled = self.encode(seq_emb)       # (B, 2D)
+        out = self.mlp(pooled)             # (B, 3)
+        if return_feat:
+            return out, pooled
         return out
 
 
@@ -131,6 +134,11 @@ class Time2GraphWindModel(object):
         self.device = device or (
             'cuda' if torch.cuda.is_available() and gpu_enable else 'cpu'
         )
+
+        # ===== 对比学习超参数 =====
+        self.contrast_weight = kwargs.get('contrast_weight', 0.1)  # 你在 run2.py 里已经传了 0.1
+        self.contrast_margin = kwargs.get('contrast_margin', 1.5)   # 可以比之前稍微大一点
+
 
         # Time2GraphEmbed 用来学习 shapelet + 图嵌入
         self.t2g = Time2GraphEmbed(
@@ -224,6 +232,66 @@ class Time2GraphWindModel(object):
         seq_tensor = torch.from_numpy(seq).float().to(self.device)
         return seq_tensor, D_emb
 
+    def _make_negative(self, seq_batch):
+        """
+        构造负样本：
+        seq_batch: (B, S, D)
+
+        操作：
+        - mask：随机一段时间片置为均值（而不是0，避免太假）
+        - local_shuffle：只在一小段窗口内打乱顺序
+        - graft：从同 batch 另一条样本嫁接一小段
+        """
+        B, S, D = seq_batch.shape
+        neg = seq_batch.clone()
+
+        for i in range(B):
+            op = random.choice(['mask', 'local_shuffle', 'graft'])
+
+            # 每条样本至少保留一点结构，不要改太狠
+            span_ratio = random.uniform(0.2, 0.4)
+            span = max(1, int(S * span_ratio))
+            start = random.randint(0, S - span)
+
+            if op == 'mask':
+                # 用该样本的整体均值来“抹掉”这一段
+                mean_vec = neg[i].mean(dim=0, keepdim=True)   # (1, D)
+                neg[i, start:start+span, :] = mean_vec
+
+            elif op == 'local_shuffle':
+                # 只打乱一个小段内部的时间顺序
+                idx = torch.randperm(span, device=neg.device)
+                segment = neg[i, start:start+span, :].clone()
+                neg[i, start:start+span, :] = segment[idx, :]
+
+            elif op == 'graft' and B > 1:
+                # 从 batch 里选一个别的样本，嫁接同长度的一段
+                j = random.randint(0, B - 1)
+                while j == i:
+                    j = random.randint(0, B - 1)
+
+                donor_start = random.randint(0, S - span)
+                donor_seg = neg[j, donor_start:donor_start+span, :].clone()
+                neg[i, start:start+span, :] = donor_seg
+
+        return neg
+
+    def _contrastive_loss(self, feat_pos, feat_neg, margin=None):
+        """
+        feat_pos, feat_neg: (B, F)
+        希望 ||feat_pos - feat_neg|| >= margin
+
+        loss = mean( relu( margin - dist_neg ) )
+        """
+        if margin is None:
+            margin = self.contrast_margin
+
+        # (B,)
+        dist_neg = torch.norm(feat_pos - feat_neg, dim=-1)
+        loss = F.relu(margin - dist_neg).mean()
+        return loss
+
+
     # --------- 对外接口：fit & predict ---------
 
     def fit(self, X, Y,
@@ -261,48 +329,73 @@ class Time2GraphWindModel(object):
                 debug=True   # 先开着调试
             ).to(self.device)
 
-        # 准备优化器和损失
+                # 准备优化器和损失
         optimizer = optim.Adam(self.regressor.parameters(), lr=lr)
-        criterion = nn.MSELoss()  # 基本版：MSE；风向你可以改成角度损失
+        criterion = nn.MSELoss()  # 对 [speed, cos, sin] 做 MSE
 
         y_tensor = torch.from_numpy(Y).float().to(self.device)
 
-        # 简单 mini-batch 训练
         idx = np.arange(N)
         for epoch in range(num_epochs):
             np.random.shuffle(idx)
-            epoch_loss = 0.0
+            epoch_reg_loss = 0.0
+            epoch_contrast_loss = 0.0
             self.regressor.train()
+
             for start in range(0, N, batch_size):
                 end = min(start + batch_size, N)
                 batch_idx = idx[start:end]
                 batch_x = seq_emb[batch_idx]      # (B, S, D)
-                batch_y = y_tensor[batch_idx]     # (B, 2)
+                batch_y = y_tensor[batch_idx]     # (B, 3)
 
+                # ------------- 正样本前向 -------------
                 optimizer.zero_grad()
-                pred = self.regressor(batch_x)    # (B, 2)
-                loss = criterion(pred, batch_y)
+                pred, feat_pos = self.regressor(batch_x, return_feat=True)  # pred: (B,3), feat_pos:(B,F)
+
+                reg_loss = criterion(pred, batch_y)
+
+                # ------------- 负样本构造 + 前向 -------------
+                neg_batch_x = self._make_negative(batch_x)  # (B, S, D)
+                _, feat_neg = self.regressor(neg_batch_x, return_feat=True)
+
+                contrast_loss = self._contrastive_loss(feat_pos, feat_neg)
+
+                # 总 loss
+                loss = reg_loss + self.contrast_weight * contrast_loss
                 loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item() * (end - start)
 
-            epoch_loss /= N
+                epoch_reg_loss += reg_loss.item() * (end - start)
+                epoch_contrast_loss += contrast_loss.item() * (end - start)
+
+            epoch_reg_loss /= N
+            epoch_contrast_loss /= N
+
             if self.verbose:
                 Debugger.info_print(
-                    f'[Epoch {epoch+1}/{num_epochs}] train_loss={epoch_loss:.6f}'
+                    f'[Epoch {epoch+1}/{num_epochs}] '
+                    f'reg_loss={epoch_reg_loss:.6f}, contrast_loss={epoch_contrast_loss:.6f}'
                 )
 
     @torch.no_grad()
     def predict(self, X, as_numpy=True):
         """
         X: numpy, (N, L, data_size)
-        返回: 预测的 [风速, 风向]，shape (N, 2)
+        返回: 预测的 [风速, cosθ, sinθ]，shape (N, 3)
         """
         assert self.regressor is not None, "model not trained yet."
         X = np.asarray(X, dtype=np.float32)
         seq_emb, _ = self._extract_shapelet_seq(X)
         self.regressor.eval()
-        preds = self.regressor(seq_emb)  # (N, 2)
+
+        out = self.regressor(seq_emb)  # 可能是 Tensor，也可能是 (Tensor, feat)
+
+        # 如果 forward 不小心返回了 (pred, feat)，这里只取 pred
+        if isinstance(out, tuple):
+            preds = out[0]
+        else:
+            preds = out
+
         if as_numpy:
             return preds.cpu().numpy()
         return preds

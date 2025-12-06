@@ -212,12 +212,11 @@ def build_t2g_dataset(x_seq, y_seq, seg_length, num_segment):
     """
     x_seq: (T, D)  长时间序列特征
     y_seq: (T, Fy) 长时间序列标签（这里 Fy=4，对应机舱4个变量）
-    seg_length, num_segment: 来自命令行，比如 24 * 21 = 504
-    target_col: y_seq 里要预测的那一列（默认 2 = 风速）
-    
+    seg_length, num_segment: 来自命令行，比如 4 * 5 = 20
+
     返回:
         X: (N, L, D)
-        y: (N,)
+        Y: (N, 3) -> [wind_speed, cosθ, sinθ]
     """
     L = seg_length * num_segment          # 每个样本的时间长度
     T = x_seq.shape[0]
@@ -227,39 +226,44 @@ def build_t2g_dataset(x_seq, y_seq, seg_length, num_segment):
     if T < L:
         raise ValueError(f"序列长度 {T} 小于一个样本长度 {L}，无法切片。")
 
-    # 为了简单，先用“非重叠窗口”：从头开始每 L 个点切一个样本
+    # 非重叠窗口
     N = T // L
-    T_trim = N * L    # 截断到可以整除的长度
+    T_trim = N * L
 
     x_seq = x_seq[:T_trim]         # (T_trim, D)
     y_seq = y_seq[:T_trim]         # (T_trim, Fy)
 
-    # 切成 (N, L, D)
-    X = x_seq.reshape(N, L, D)     # (N, L, D)
+    X = x_seq.reshape(N, L, D)         # (N, L, D)
     y_block = y_seq.reshape(N, L, Fy)  # (N, L, Fy)
 
-    # 取每段最后一个时间点的风速和风向作为回归标签
-    # 机舱数据中：第2列是风速，第3列是风向
+    # 取每段最后一个时间点的机舱风速、风向
     wind_speed = y_block[:, -1, 2]     # (N,)
-    wind_direction = y_block[:, -1, 3] # (N,)
-    
-    Y = np.column_stack([wind_speed, wind_direction])  # (N, 2)
+    angle_raw  = y_block[:, -1, 3]     # (N,)  这里假设是 0~1 归一化的角度
+
+    # 如果 angle_raw 已经是 0~360°，就改成: rad = np.deg2rad(angle_raw)
+    rad = angle_raw * 2 * np.pi
+    cos_dir = np.cos(rad)
+    sin_dir = np.sin(rad)
+
+    Y = np.column_stack([wind_speed, cos_dir, sin_dir])  # (N, 3)
 
     # === debug 2: 检查窗口最后一个输入点 & 标签的关系 ===
     print("=== debug window-level label in build_t2g_dataset ===")
-    print("X shape:", X.shape, "Y shape:", Y.shape)  # 期望: (N, L, 7), (N, 2)
+    print("X shape:", X.shape, "Y shape:", Y.shape)  # 期望: (N, L, 7), (N, 3)
     for i in range(min(5, N)):
         last_speed_in_X = X[i, -1, 2]
-        last_dir_in_X   = X[i, -1, 3]
-        label_speed, label_dir = Y[i]
+        last_dir_in_X   = X[i, -1, 3]  # 这里仍然是原始输入中的角度/归一化角度
+        label_speed, label_cos, label_sin = Y[i]
+        label_angle_deg = (np.rad2deg(np.arctan2(label_sin, label_cos)) + 360) % 360
         print(
             f"sample {i}: last_speed_in_X={last_speed_in_X:.4f}, "
             f"label_speed(+1 step)={label_speed:.4f} | "
             f"last_dir_in_X={last_dir_in_X:.2f}, "
-            f"label_dir(+1 step)={label_dir:.2f}"
+            f"label_angle_deg(+1 step)={label_angle_deg:.2f}"
         )
 
     return X, Y
+
 
 def filter_invalid_samples(X, Y):
     """
@@ -394,14 +398,19 @@ if __name__ == '__main__':
     print("=== debug 3: final train set check ===")
     for i in range(min(5, X_train.shape[0])):
         last_speed = X_train[i, -1, 2]
-        last_dir   = X_train[i, -1, 3]
-        label_speed, label_dir = Y_train[i]
+        last_dir_raw = X_train[i, -1, 3]   # 这里还是原始输入里的角度/归一化角度
+
+        label_speed, label_cos, label_sin = Y_train[i]
+        # 由 (cos, sin) 还原出角度（单位：度）
+        label_angle_deg = (np.rad2deg(np.arctan2(label_sin, label_cos)) + 360) % 360
+
         print(
             f"[final] sample {i}: last_speed_in_X={last_speed:.4f}, "
             f"label_speed(+1)={label_speed:.4f} | "
-            f"last_dir_in_X={last_dir:.2f}, "
-            f"label_dir(+1)={label_dir:.2f}"
+            f"last_dir_in_X(raw)={last_dir_raw:.4f}, "
+            f"label_angle_deg(+1)={label_angle_deg:.2f}"
         )
+
     # 4) 创建模型
     m = Time2GraphWindModel(
         K=args.K,
@@ -422,6 +431,7 @@ if __name__ == '__main__':
         transformer_ff=args.transformer_ff,
         dropout=args.dropout,
         verbose=True,
+        contrast_weight=0.1,
         shapelets_cache='{}/scripts/cache/{}/{}_{}_{}_{}_shapelets.cache'.format(
             module_path, farm ,turbine_id ,args.cmethod, args.K, args.seg_length)
     )
@@ -470,16 +480,24 @@ if __name__ == '__main__':
     wind_speed_mae = mean_absolute_error(wind_speed_true, wind_speed_pred)
     wind_speed_rmse = np.sqrt(wind_speed_mse)
     
-    # 计算风向的 MAE
-    wind_direction_pred = y_pred[:, 1]  # 假设风向是预测的第二个列
-    wind_direction_true = Y_test[:, 1]
-    wind_direction_mae = mean_absolute_error(wind_direction_true, wind_direction_pred)
-    
-    # 打印结果
+    # --------- 风向角度 MAE（单位：度）---------
+    cos_pred = y_pred[:, 1]
+    sin_pred = y_pred[:, 2]
+    cos_true = Y_test[:, 1]
+    sin_true = Y_test[:, 2]
+
+    # atan2 得到 [-pi, pi]，再转成 [0, 360)
+    angle_pred = (np.rad2deg(np.arctan2(sin_pred, cos_pred)) + 360) % 360
+    angle_true = (np.rad2deg(np.arctan2(sin_true, cos_true)) + 360) % 360
+
+    # 最小角差 Δ(θ, θ^) = min(|Δ|, 360-|Δ|)
+    angle_diff = np.abs(angle_pred - angle_true)
+    angle_diff = np.minimum(angle_diff, 360 - angle_diff)
+    wind_direction_mae = angle_diff.mean()
+
     Debugger.info_print(
         f"{farm}/{turbine_id} 的结果: "
         f"风速 RMSE: {wind_speed_rmse:.4f}, 风速 MSE: {wind_speed_mse:.4f}, "
-        f"风速 MAE: {wind_speed_mae:.4f}, 风向 MAE: {wind_direction_mae:.4f}"
+        f"风速 MAE: {wind_speed_mae:.4f}, 风向 MAE(度): {wind_direction_mae:.4f}"
     )
-
 

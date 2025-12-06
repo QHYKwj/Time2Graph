@@ -11,7 +11,7 @@ from scripts.run2 import load_weather_data
 
 
 def load_infer_sample(base_dir,
-                      weather_fname="m01_weather.csv",
+                      weather_fname="weather.csv",
                       predict_fname="m01_predict.csv",
                       true_fname="m01_true.csv",
                       step_sec=30,
@@ -81,7 +81,8 @@ def load_infer_sample(base_dir,
 
 
 if __name__ == "__main__":
-    base_dir = '/mnt/e/Desktop/Xplanet/AI比赛/预测数据/m01'
+    # base_dir = '/mnt/e/Desktop/Xplanet/AI比赛/预测数据/m01'
+    base_dir = '/mnt/e/Desktop/Xplanet/AI比赛/训练集'
     farm = '风场1'
     turbine_id = 'm01'
 
@@ -92,7 +93,7 @@ if __name__ == "__main__":
     # 1) 读取推理样本 (1 小时输入 + m01_true 真实10分钟)
     time_hist, turbine_1h, true_times, true_speed, true_dir = load_infer_sample(
         base_dir=base_dir,
-        weather_fname="m01_weather.csv",
+        weather_fname="weather.csv",
         predict_fname="m01_predict.csv",
         true_fname="m01_true.csv",
         step_sec=step_sec,
@@ -102,9 +103,9 @@ if __name__ == "__main__":
     # 2) 构造 Time2GraphWindModel（一定要和训练 run2.py 的参数一致！！）
     seg_length = 5      # 保证 seg_length * num_segment == 1 小时时间点数
     num_segment = 4      # 24 * 5 = 120
-    K = 10
+    K = 15
     C = 300
-    percentile = 5
+    percentile = 10
 
     m = Time2GraphWindModel(
         K=K,
@@ -125,6 +126,7 @@ if __name__ == "__main__":
         transformer_ff=256,
         dropout=0.1,
         verbose=True,
+        contrast_weight=0.1,
         shapelets_cache='{}/scripts/cache/{}/{}_{}_{}_{}_shapelets.cache'.format(
             module_path, farm, turbine_id,'greedy', K, seg_length
         )
@@ -156,7 +158,7 @@ if __name__ == "__main__":
     pred_speed_list = []
     pred_dir_list = []
 
-    weather_path = os.path.join(base_dir, "m01_weather.csv")
+    weather_path = os.path.join(base_dir, "weather.csv")
     if not os.path.isfile(weather_path):
         raise FileNotFoundError(f"找不到气象数据文件: {weather_path}")
 
