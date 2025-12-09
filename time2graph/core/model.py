@@ -71,9 +71,22 @@ class ShapeletSeqRegressor(nn.Module):
     def forward(self, seq_emb, return_feat=False):
         """
         return_feat=True 时同时返回 (output, feature)
+        输出:
+          out: (B, 3) -> [speed, cos, sin]，其中 (cos, sin) 已经被归一化到单位圆上
         """
         pooled = self.encode(seq_emb)       # (B, 2D)
-        out = self.mlp(pooled)             # (B, 3)
+        raw_out = self.mlp(pooled)         # (B, 3)
+
+        # 第一个分量：风速
+        speed = raw_out[:, :1]             # (B, 1)
+
+        # 后两个分量：原始方向向量 -> 归一化成单位向量
+        vec = raw_out[:, 1:]               # (B, 2)
+        vec_norm = torch.clamp(vec.norm(dim=-1, keepdim=True), min=1e-6)  # 防止除 0
+        dir_unit = vec / vec_norm          # (B, 2) 现在 cos^2 + sin^2 ≈ 1
+
+        out = torch.cat([speed, dir_unit], dim=-1)  # (B, 3)
+
         if return_feat:
             return out, pooled
         return out
@@ -136,9 +149,10 @@ class Time2GraphWindModel(object):
         )
 
         # ===== 对比学习超参数 =====
-        self.contrast_weight = kwargs.get('contrast_weight', 0.1)  # 你在 run2.py 里已经传了 0.1
-        self.contrast_margin = kwargs.get('contrast_margin', 1.5)   # 可以比之前稍微大一点
-
+        self.contrast_weight = kwargs.get('contrast_weight', 0.0)  # 你在 run2.py 里已经传了 0.1
+        self.contrast_margin = kwargs.get('contrast_margin', 4.0)   # 可以比之前稍微大一点
+        # ===== 风向损失的权重（相对于风速）=====
+        self.dir_loss_weight = kwargs.get('dir_loss_weight', 5.0)
 
         # Time2GraphEmbed 用来学习 shapelet + 图嵌入
         self.t2g = Time2GraphEmbed(
@@ -329,9 +343,8 @@ class Time2GraphWindModel(object):
                 debug=True   # 先开着调试
             ).to(self.device)
 
-                # 准备优化器和损失
+        # ====== 准备优化器 & 角度损失权重 ======
         optimizer = optim.Adam(self.regressor.parameters(), lr=lr)
-        criterion = nn.MSELoss()  # 对 [speed, cos, sin] 做 MSE
 
         y_tensor = torch.from_numpy(Y).float().to(self.device)
 
@@ -340,22 +353,44 @@ class Time2GraphWindModel(object):
             np.random.shuffle(idx)
             epoch_reg_loss = 0.0
             epoch_contrast_loss = 0.0
+            epoch_speed_loss = 0.0
+            epoch_dir_loss = 0.0
+
             self.regressor.train()
 
             for start in range(0, N, batch_size):
                 end = min(start + batch_size, N)
                 batch_idx = idx[start:end]
                 batch_x = seq_emb[batch_idx]      # (B, S, D)
-                batch_y = y_tensor[batch_idx]     # (B, 3)
+                batch_y = y_tensor[batch_idx]     # (B, 3) -> [speed, cos, sin]
+
+                optimizer.zero_grad()
 
                 # ------------- 正样本前向 -------------
-                optimizer.zero_grad()
-                pred, feat_pos = self.regressor(batch_x, return_feat=True)  # pred: (B,3), feat_pos:(B,F)
+                pred, feat_pos = self.regressor(batch_x, return_feat=True)
+                # pred: (B,3) -> [speed, cos, sin]，其中 (cos, sin) 已经单位化
 
-                reg_loss = criterion(pred, batch_y)
+                # 拆开三维
+                speed_pred = pred[:, 0]
+                cos_pred   = pred[:, 1]
+                sin_pred   = pred[:, 2]
 
-                # ------------- 负样本构造 + 前向 -------------
-                neg_batch_x = self._make_negative(batch_x)  # (B, S, D)
+                speed_true = batch_y[:, 0]
+                cos_true   = batch_y[:, 1]
+                sin_true   = batch_y[:, 2]
+
+                # ---- 速度损失：MSE ----
+                speed_loss = F.mse_loss(speed_pred, speed_true)
+
+                # ---- 方向损失：1 - cos(Δθ)（等价于 1 - 点积）----
+                dot = cos_pred * cos_true + sin_pred * sin_true
+                dot = torch.clamp(dot, -1.0, 1.0)         # 数值稳定一下
+                dir_loss = (1.0 - dot).mean()             # 越小方向越接近
+
+                reg_loss = speed_loss + self.dir_loss_weight * dir_loss
+
+                # ------------- 负样本构造 + 前向（对比学习）-------------
+                neg_batch_x = self._make_negative(batch_x)      # (B, S, D)
                 _, feat_neg = self.regressor(neg_batch_x, return_feat=True)
 
                 contrast_loss = self._contrastive_loss(feat_pos, feat_neg)
@@ -365,17 +400,27 @@ class Time2GraphWindModel(object):
                 loss.backward()
                 optimizer.step()
 
-                epoch_reg_loss += reg_loss.item() * (end - start)
-                epoch_contrast_loss += contrast_loss.item() * (end - start)
+                bs = end - start
+                epoch_reg_loss      += reg_loss.item()      * bs
+                epoch_contrast_loss += contrast_loss.item() * bs
+                epoch_speed_loss    += speed_loss.item()    * bs
+                epoch_dir_loss      += dir_loss.item()      * bs
 
-            epoch_reg_loss /= N
+            epoch_reg_loss      /= N
             epoch_contrast_loss /= N
+            epoch_speed_loss    /= N
+            epoch_dir_loss      /= N
 
             if self.verbose:
                 Debugger.info_print(
                     f'[Epoch {epoch+1}/{num_epochs}] '
-                    f'reg_loss={epoch_reg_loss:.6f}, contrast_loss={epoch_contrast_loss:.6f}'
+                    f'reg_loss={epoch_reg_loss:.6f}, '
+                    f'speed_loss={epoch_speed_loss:.6f}, '
+                    f'dir_loss={epoch_dir_loss:.6f}, '
+                    f'contrast_loss={epoch_contrast_loss:.6f}'
                 )
+
+
 
     @torch.no_grad()
     def predict(self, X, as_numpy=True):
