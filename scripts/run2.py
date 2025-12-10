@@ -39,40 +39,38 @@ def load_turbine_data(turbine_dir):
         # 把 inf/-inf 先变成 NaN
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-        # 用前向填充 + 后向填充补上缺失（避免直接 drop 掉时间点）
-        df["变频器电网侧有功功率"].interpolate(inplace=True)
-        df["外界温度"].interpolate(inplace=True)
-        df["风速"].interpolate(inplace=True)
-        df["风向"].interpolate(inplace=True)
+        # 插值处理
+        for col in ["变频器电网侧有功功率", "外界温度", "风速", "风向"]:
+            df[col] = df[col].interpolate().fillna(method="ffill").fillna(method="bfill")
 
-        df.fillna(method="ffill", inplace=True)
-        df.fillna(method="bfill", inplace=True)
-
-        # 清洗之后如果还是全 NaN，就跳过这个文件
-        if df[["变频器电网侧有功功率", "外界温度", "风速", "风向"]].isna().all().any():
-            print(f"⚠ 清洗后仍有关键列全为 NaN，跳过文件 {file_path}")
+        if df.isna().any().any():
             continue
 
-        # 时间
         time_stamps = pd.to_datetime(df["time"]).astype("datetime64[s]").values
-
+        
+        # 2. 关键修改：输入特征向量化
         power = df["变频器电网侧有功功率"].values
         temperature = df["外界温度"].values
         wind_speed = df["风速"].values
-        wind_dir = df["风向"].values
+        
+        # 将输入风向直接转为 Cos/Sin，消除 0/360 跳变
+        wind_dir_deg = df["风向"].values
+        wind_dir_rad = np.deg2rad(wind_dir_deg)
+        wd_cos = np.cos(wind_dir_rad)
+        wd_sin = np.sin(wind_dir_rad)
 
-        data = np.column_stack([power, temperature, wind_speed, wind_dir])
+        # data 现在的列结构: [0:Power, 1:Temp, 2:Speed, 3:Cos, 4:Sin]# 注意：这里我们不再保留原始角度，因为它对模型有害
+        data = np.column_stack([power, temperature, wind_speed, wd_cos, wd_sin])
 
         turbine_data_list.append(data)
         ts_list.append(time_stamps)
 
     if not turbine_data_list:
-        raise ValueError(f"❌ {turbine_dir} 下所有 csv 都被跳过，检查列名/数据。")
+        raise ValueError(f"❌ {turbine_dir} 数据加载失败")
 
-    turbine_data = np.concatenate(turbine_data_list, axis=0)   # (T, 4)
-    timestamps = np.concatenate(ts_list, axis=0)               # (T,)
-
-    print(f"✔ {turbine_dir} 加载完成: 数据点 {turbine_data.shape[0]}")
+    turbine_data = np.concatenate(turbine_data_list, axis=0)
+    timestamps = np.concatenate(ts_list, axis=0)
+    print(f"✔ {turbine_dir} 加载完成: {turbine_data.shape}")
     return turbine_data, timestamps
 
 
@@ -169,7 +167,7 @@ def load_full_dataset(base_dir, farm, turbine_id, train_end_date):
 
     # 3) 拼接机舱 + 气象 → 特征序列
     full_data = np.concatenate([turbine_data, weather_data], axis=-1)  # (T,7)
-
+    print("full_data shape: ", full_data.shape)
     # 4) 时间切 train/test
     train_end_ts = pd.to_datetime(train_end_date)   # pandas Timestamp
 
@@ -185,84 +183,45 @@ def load_full_dataset(base_dir, farm, turbine_id, train_end_date):
 
     # 5) 生成回归目标：用 np.roll 取未来 20 步（10 分钟）的机舱 4 维
     # 注意：最后 20 个样本的标签会“循环”到前面，如果要严格避免泄露，可以后续再裁剪。
-    horizon = 1
-    y_train = np.roll(turbine_train, -horizon, axis=0)  # (T_train, 4)
-    y_test  = np.roll(turbine_test, -horizon, axis=0)   # (T_test, 4)
+    horizon = 20
 
-    print(f"{farm}/{turbine_id} -> x_train: {x_train.shape}, y_train: {y_train.shape}, "
-          f"x_test: {x_test.shape}, y_test: {y_test.shape}")
-    
-    # === debug 1: 检查 np.roll 的效果是不是 +1 步 ===
-    print("=== debug roll in load_full_dataset ===")
-    T_train = turbine_train.shape[0]
-    check_idx = [100, 500, 1000]  # 可以随便挑几个，不越界就行
-    for t in check_idx:
-        if t + 1 >= T_train:
-            continue
-        cur_speed = turbine_train[t, 2]
-        next_speed = turbine_train[t + 1, 2]
-        rolled_speed = y_train[t, 2]
-        print(f"t={t}: cur_speed={cur_speed:.4f}, "
-              f"next_speed={next_speed:.4f}, "
-              f"rolled_label_speed={rolled_speed:.4f}")
-    
+    # 这里的 turbine_data 已经是 [Power, Temp, Speed, Cos, Sin]
+    y_train = np.roll(turbine_train, -horizon, axis=0) 
+    y_test  = np.roll(turbine_test, -horizon, axis=0)
+
+    # 去掉最后 horizon 个无效数据（因为 roll 导致循环了）
+    x_train, y_train = x_train[:-horizon], y_train[:-horizon]
+    x_test, y_test = x_test[:-horizon], y_test[:-horizon]
+
     return x_train, y_train, x_test, y_test
 
 def build_t2g_dataset(x_seq, y_seq, seg_length, num_segment):
     """
-    x_seq: (T, D)  长时间序列特征
-    y_seq: (T, Fy) 长时间序列标签（这里 Fy=4，对应机舱4个变量）
-    seg_length, num_segment: 来自命令行，比如 4 * 5 = 20
-
-    返回:
-        X: (N, L, D)
-        Y: (N, 3) -> [wind_speed, cosθ, sinθ]
+    x_seq: (T, 8)  输入的时间序列数据 (T: 时间步数, 8: 每个时间步的特征)
+    y_seq: (T, 5)  标签数据，包含 [Power, Temp, Speed, Cos, Sin]
+    seg_length: 每个样本的时间片段长度
+    num_segment: 每个时间序列分成的段数
     """
-    L = seg_length * num_segment          # 每个样本的时间长度
-    T = x_seq.shape[0]
-    D = x_seq.shape[1]
-    Fy = y_seq.shape[1]
+    N = x_seq.shape[0]  # 样本数量
+    L = seg_length * num_segment  # 每个样本的总长度（seg_length * num_segment）
+    Fy = 3  # 输出特征维度 [Speed, Cos, Sin]
 
-    if T < L:
-        raise ValueError(f"序列长度 {T} 小于一个样本长度 {L}，无法切片。")
+    # 直接将输入序列（x_seq）和标签序列（y_seq）调整为合适的形状
+    # 这里假设我们直接使用整个时间序列（不做滑动窗口），而是将数据按时间步长进行切分
+    X = x_seq.reshape(N, L, 8)  # 将 x_seq 按照 (N, L, D) 格式重塑
+    y_block = y_seq.reshape(N, L, 5)  # 将 y_seq 按照 (N, L, Fy) 格式重塑
 
-    # 非重叠窗口
-    N = T // L
-    T_trim = N * L
+    # 【关键修改】：直接取 y_seq 的最后一个时间步作为目标，目标为 [Speed, Cos, Sin]
+    target_speed = y_block[:, -1, 2]  # 取最后一个时间步的 Speed
+    target_cos   = y_block[:, -1, 3]  # 取最后一个时间步的 Cos
+    target_sin   = y_block[:, -1, 4]  # 取最后一个时间步的 Sin
 
-    x_seq = x_seq[:T_trim]         # (T_trim, D)
-    y_seq = y_seq[:T_trim]         # (T_trim, Fy)
-
-    X = x_seq.reshape(N, L, D)         # (N, L, D)
-    y_block = y_seq.reshape(N, L, Fy)  # (N, L, Fy)
-
-    # 取每段最后一个时间点的机舱风速、风向
-    wind_speed = y_block[:, -1, 2]     # (N,)
-    angle_raw  = y_block[:, -1, 3]     # (N,)  这里假设是 0~1 归一化的角度
-
-    # 如果 angle_raw 已经是 0~360°，就改成: rad = np.deg2rad(angle_raw)
-    rad = angle_raw * 2 * np.pi
-    cos_dir = np.cos(rad)
-    sin_dir = np.sin(rad)
-
-    Y = np.column_stack([wind_speed, cos_dir, sin_dir])  # (N, 3)
-
-    # === debug 2: 检查窗口最后一个输入点 & 标签的关系 ===
-    print("=== debug window-level label in build_t2g_dataset ===")
-    print("X shape:", X.shape, "Y shape:", Y.shape)  # 期望: (N, L, 7), (N, 3)
-    for i in range(min(5, N)):
-        last_speed_in_X = X[i, -1, 2]
-        last_dir_in_X   = X[i, -1, 3]  # 这里仍然是原始输入中的角度/归一化角度
-        label_speed, label_cos, label_sin = Y[i]
-        label_angle_deg = (np.rad2deg(np.arctan2(label_sin, label_cos)) + 360) % 360
-        print(
-            f"sample {i}: last_speed_in_X={last_speed_in_X:.4f}, "
-            f"label_speed(+1 step)={label_speed:.4f} | "
-            f"last_dir_in_X={last_dir_in_X:.2f}, "
-            f"label_angle_deg(+1 step)={label_angle_deg:.2f}"
-        )
+    # 将目标拼接成最终的 Y
+    Y = np.column_stack([target_speed, target_cos, target_sin])  # (N, 3)
 
     return X, Y
+
+
 
 
 def filter_invalid_samples(X, Y):
@@ -299,7 +258,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_segment', type=int, default=12, help='number of segment a time series is divided into')
     parser.add_argument('--seg_length', type=int, default=30, help='segment length')
     parser.add_argument('--njobs', type=int, default=8, help='number of threads in parallel')
-    parser.add_argument('--data_size', type=int, default=1, help='data dimension of time series')
+    parser.add_argument('--data_size', type=int, default=8, help='data dimension of time series')
     parser.add_argument('--optimizer', type=str, default='Adam', help='optimizer used in time-aware shapelets learning')
     parser.add_argument('--alpha', type=float, default=0.1, help='penalty parameter of local timing factor')
     parser.add_argument('--beta', type=float, default=0.05, help='penalty parameter of global timing factor')

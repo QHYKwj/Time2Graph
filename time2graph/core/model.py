@@ -37,11 +37,10 @@ class ShapeletSeqRegressor(nn.Module):
         self.debug = debug
         self.register_buffer("debug_printed", torch.zeros(1, dtype=torch.bool))
 
-        # 输入维度 = mean + max pooling，所以是 2 * embed_dim
         self.mlp = nn.Sequential(
-            nn.Linear(2 * embed_dim, ff_hidden_dim),
+            nn.Linear(2*embed_dim, ff_hidden_dim),
             nn.ReLU(),
-            nn.Linear(ff_hidden_dim, 3)   # 输出 [speed, cos, sin]
+            nn.Linear(ff_hidden_dim, 3)  # 输出 [speed, cos, sin]
         )
 
     def encode(self, seq_emb):
@@ -114,7 +113,7 @@ class Time2GraphWindModel(object):
                  percentile=15,
                  embed_mode='concate',
                  batch_size=100,
-                 data_size=1,
+                 data_size=8,
                  scaled=False,
                  device=None,
                  transformer_heads=4,
@@ -149,10 +148,10 @@ class Time2GraphWindModel(object):
         )
 
         # ===== 对比学习超参数 =====
-        self.contrast_weight = kwargs.get('contrast_weight', 0.0)  # 你在 run2.py 里已经传了 0.1
+        self.contrast_weight = kwargs.get('contrast_weight', 0.5)  # 你在 run2.py 里已经传了 0.1
         self.contrast_margin = kwargs.get('contrast_margin', 4.0)   # 可以比之前稍微大一点
         # ===== 风向损失的权重（相对于风速）=====
-        self.dir_loss_weight = kwargs.get('dir_loss_weight', 5.0)
+        self.dir_loss_weight = kwargs.get('dir_loss_weight', 4.0)
 
         # Time2GraphEmbed 用来学习 shapelet + 图嵌入
         self.t2g = Time2GraphEmbed(
@@ -244,6 +243,9 @@ class Time2GraphWindModel(object):
             Debugger.info_print(f"[DEBUG] seq_emb[0] vs seq_emb[1] L2 = {diff:.6f}")
         
         seq_tensor = torch.from_numpy(seq).float().to(self.device)
+        print(f"Input data shape: {X.shape}")  # 打印输入数据的维度
+        print(f"Embedding shape: {emb.shape}")  # 打印嵌入的形状
+        print(f"Total embedding dimension: {total_dim}, D_emb: {D_emb}")
         return seq_tensor, D_emb
 
     def _make_negative(self, seq_batch):
@@ -311,7 +313,7 @@ class Time2GraphWindModel(object):
     def fit(self, X, Y,
             lr=1e-3,
             num_epochs=50,
-            batch_size=64,
+            batch_size=32,
             cache_dir='./cache'):
         """
         训练过程：
